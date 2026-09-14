@@ -10,7 +10,6 @@ enum MapFlavor: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self { case .standard: "map"; case .hybrid: "map.fill"; case .satellite: "globe.europe.africa.fill" }
     }
-    }
 }
 
 /// Window-level shell. Its body must not read `playback.elapsed`: everything that moves per frame
