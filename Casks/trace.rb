@@ -1,6 +1,6 @@
 cask "trace" do
-  version "1.1"
-  sha256 "8e0e6cb6e22a301384c8d27760d6ba8ef2d7c5e3683af62eb7223ba06e901c41"
+  version "1.2"
+  sha256 "c0ae48aa4d6988fe98e8fa101f976303bcbc3beb33e1066da0549b14ca53c9e5"
 
   url "https://github.com/ljack/macos-gpx-viewer/releases/download/v#{version}/Trace-#{version}.zip"
   name "Trace"
