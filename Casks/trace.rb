@@ -7,7 +7,7 @@ cask "trace" do
   desc "Native GPX viewer with speed-coloured tracks and flyover replay"
   homepage "https://github.com/ljack/macos-gpx-viewer"
 
-  depends_on macos: ">= :tahoe"
+  depends_on macos: :tahoe
 
   app "Trace.app"
 
