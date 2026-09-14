@@ -213,7 +213,9 @@ struct MomentPin: View {
                     }
                 }
                 .padding(4)
-                .glassEffect(.regular, in: .capsule)
+                .background(.regularMaterial, in: .capsule)
+                .overlay(Capsule().strokeBorder(.white.opacity(0.35), lineWidth: 0.5))
+                .shadow(color: .black.opacity(0.18), radius: 3, y: 1)
                 Triangle()
                     .fill(.white.opacity(0.9))
                     .frame(width: 10, height: 6)

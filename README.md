@@ -68,6 +68,44 @@ Trace/
     SpeedPalette.swift    Slow→fast colour ramp
 ```
 
+## Performance
+
+Playback is driven by a `CADisplayLink`, and every per-frame update bypasses SwiftUI diffing: the map is an `MKMapView` updated imperatively (camera, rider), the track is one gradient polyline renderer per segment, moment pins are pre-rendered bitmaps, and SwiftUI only sees a coarse playhead published at 10 Hz. The flyover camera follows a denoised copy of the track (triangular moving average over ±8 s, heading from a ±6 s window) with time-based low-pass filters, so GPS jitter and polyline corners don't shake the view.
+
+Measured on the sample ride (M-series MacBook, 60 Hz displays, Release build, CPU from cumulative process time over 15 s):
+
+| | Frame cadence | Process CPU |
+|---|---|---|
+| Idle, paused | – | ~2 % |
+| Flyover playback | 60 Hz, p90 17.3 ms, ≤2 frames >20 ms per 1400 | ~40 % of one core |
+| Flyover playback, 1.1 | 60 Hz | ~58 % |
+
+What remains is MapKit rendering the moving 3D scene: about 70 % of the main-thread time is VectorKit's scene render and Core Animation commit, ~10 % the per-frame camera set, and the app's own logic is under 1 %. Realistic terrain vs flat and points of interest on vs off made no measurable difference. Frame rate is the one lever left, so playback honours Low Power Mode with 30 fps and otherwise asks for the display's native rate.
+
+Environment variables for testing: `TRACE_AUTOPLAY=0.45` starts playback at 45 % of the ride; `TRACE_SEEK=0.2` seeks without playing; `TRACE_FLYOVER=0` starts with flyover off; `TRACE_APPEARANCE=dark|light` forces the appearance; `TRACE_CAMLOG=1` logs requested and reported camera positions to stderr for cadence analysis.
+
+## Layout
+
+```
+Trace/
+  TraceApp.swift          DocumentGroup scene, menu commands
+  GPXDocument.swift       FileDocument for com.topografix.gpx
+  DefaultHandler.swift    NSWorkspace default-app registration
+  Playback.swift          Observable replay clock
+  Model/
+    GPXParser.swift       Streaming XMLParser for GPX 1.0/1.1 (trk, rte, wpt)
+    TrackBuilder.swift    Distance, smoothed speed, stats, moment detection
+    Track.swift           Analysed track, interpolation, speed-band runs
+    Format.swift          Locale-aware formatting
+  Views/
+    TrackView.swift       Window shell: overlays, toolbar, default-handler offer
+    MapStage.swift        MKMapView stage: gradient track, rider, flyover camera (imperative, per-frame)
+    StatsCard.swift       Ride summary
+    MomentsCard.swift     Moment list
+    TimelinePanel.swift   Transport, speed chart scrubber, readout
+    SpeedPalette.swift    Slow→fast colour ramp
+```
+
 ## Smooth playback
 
 Playback is driven by a `CADisplayLink`, and every per-frame update (camera, rider marker, playhead, readout) bypasses SwiftUI diffing: the map is an `MKMapView` updated imperatively, the chart is static with a separate playhead overlay, and the shell view never reads the playhead. The flyover camera follows a denoised copy of the track (triangular moving average over ±8 s, heading from a ±6 s window) with time-based low-pass filters, so GPS jitter and polyline corners don't shake the view. Measured on the sample ride: 60 Hz with no dropped frames.

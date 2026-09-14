@@ -35,8 +35,8 @@ targets:
       properties:
         CFBundleName: Trace
         CFBundleDisplayName: Trace
-        CFBundleShortVersionString: "1.1"
-        CFBundleVersion: "2"
+        CFBundleShortVersionString: "1.2"
+        CFBundleVersion: "3"
         LSApplicationCategoryType: public.app-category.navigation
         LSMinimumSystemVersion: "26.0"
         NSHumanReadableCopyright: "© 2026 Jarkko Lietolahti"

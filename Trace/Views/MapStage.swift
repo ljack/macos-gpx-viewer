@@ -84,11 +84,11 @@ struct MapStage: NSViewRepresentable {
                 a.title = wp.name
                 map.addAnnotation(a)
             }
-            rider.coordinate = track.sample(at: playback.elapsed).coordinate
+            rider.coordinate = track.sample(at: playback.time).coordinate
             map.addAnnotation(rider)
             fit(animated: false)
 
-            playback.elapsedHandler = { [weak self] t in self?.tick(t) }
+            playback.timeHandler = { [weak self] t in self?.tick(t) }
             observePlayback()
         }
 
@@ -147,12 +147,12 @@ struct MapStage: NSViewRepresentable {
                     v.displayPriority = .required
                     riderView = v
                     v.setPlaying(playback.isPlaying)
-                    updateRiderAppearance(track.sample(at: playback.elapsed))
+                    updateRiderAppearance(track.sample(at: playback.time))
                     return v
                 }
                 if let m = annotation as? MomentAnnotation {
                     let v = mapView.dequeueReusableAnnotationView(withIdentifier: MomentAnnotationView.identifier, for: annotation) as! MomentAnnotationView
-                    v.configure(moment: m.moment) { [weak self] in self?.onSeek(m.moment.t) }
+                    v.configure(moment: m.moment)
                     v.displayPriority = .defaultHigh
                     return v
                 }
@@ -163,6 +163,13 @@ struct MapStage: NSViewRepresentable {
                 }
                 return nil
             }
+        }
+
+        func mapView(_ mapView: MKMapView, didSelect view: MKAnnotationView) {
+            if let m = view.annotation as? MomentAnnotation {
+                onSeek(m.moment.t)
+            }
+            mapView.deselectAnnotation(view.annotation, animated: false)
         }
 
         func setMomentsVisible(_ visible: Bool) {
@@ -176,8 +183,7 @@ struct MapStage: NSViewRepresentable {
             self.flavor = flavor
             switch flavor {
             case .standard:
-                let c = MKStandardMapConfiguration(elevationStyle: .realistic, emphasisStyle: .muted)
-                map.preferredConfiguration = c
+                map.preferredConfiguration = MKStandardMapConfiguration(elevationStyle: .realistic, emphasisStyle: .muted)
             case .hybrid:
                 map.preferredConfiguration = MKHybridMapConfiguration(elevationStyle: .realistic)
             case .satellite:
@@ -220,7 +226,7 @@ struct MapStage: NSViewRepresentable {
         /// Swoop from wherever the camera is to the rider, then hand over to per-frame following.
         private func enter() {
             guard let map else { return }
-            let t = playback.elapsed
+            let t = playback.time
             let target = track.smooth.position(at: t)
             heading = track.smooth.bearing(at: t) ?? heading
             cameraCenter = target
@@ -264,19 +270,27 @@ struct MapStage: NSViewRepresentable {
             map.camera = MKMapCamera(lookingAtCenter: center, fromDistance: 1400, pitch: 62, heading: heading)
         }
 
+        private var lastGlyphBearing = Double.nan
+        private var lastGlyphBand = -1
+
+        /// Only touches the SwiftUI glyph when the change would be visible (≥1° or a new colour band).
         private func updateRiderAppearance(_ sample: Sample) {
             guard let riderView, let map else { return }
-            let bearing = (track.smooth.bearing(at: sample.t) ?? sample.bearing) - map.camera.heading
-            riderView.update(bearing: bearing, color: NSColor(SpeedPalette.color(track.speedFraction(sample.speed))))
+            let bearing = ((track.smooth.bearing(at: sample.t) ?? sample.bearing) - map.camera.heading).rounded()
+            let band = Int(track.speedFraction(sample.speed) * 48)
+            guard bearing != lastGlyphBearing || band != lastGlyphBand else { return }
+            lastGlyphBearing = bearing
+            lastGlyphBand = band
+            riderView.update(bearing: bearing, color: NSColor(SpeedPalette.color(Double(band) / 48)))
         }
 
         func mapViewDidChangeVisibleRegion(_ mapView: MKMapView) {
             do {
                 if Self.cameraLog {
                     let c = mapView.camera
-                    FileHandle.standardError.write("CAM \(ProcessInfo.processInfo.systemUptime) \(playback.elapsed) \(c.centerCoordinate.latitude) \(c.centerCoordinate.longitude) \(c.heading)\n".data(using: .utf8)!)
+                    FileHandle.standardError.write("CAM \(ProcessInfo.processInfo.systemUptime) \(playback.time) \(c.centerCoordinate.latitude) \(c.centerCoordinate.longitude) \(c.heading)\n".data(using: .utf8)!)
                 }
-                if !playback.isPlaying { updateRiderAppearance(track.sample(at: playback.elapsed)) }
+                if !playback.isPlaying { updateRiderAppearance(track.sample(at: playback.time)) }
             }
         }
     }
@@ -372,26 +386,27 @@ struct RiderGlyph: View {
     }
 }
 
+/// Moment pins are rendered once to a bitmap: an image annotation costs MapKit almost nothing to
+/// reposition on every camera change, unlike a hosted SwiftUI view that would be laid out each time.
 final class MomentAnnotationView: MKAnnotationView {
     static let identifier = "moment"
-    private var host: NSHostingView<MomentPin>?
+    private var renderedID: UUID?
 
     override init(annotation: MKAnnotation?, reuseIdentifier: String?) {
         super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
-        wantsLayer = true
+        canShowCallout = false
     }
 
     required init?(coder: NSCoder) { nil }
 
-    func configure(moment: Moment, action: @escaping () -> Void) {
-        host?.removeFromSuperview()
-        let h = NSHostingView(rootView: MomentPin(moment: moment, action: action))
-        h.translatesAutoresizingMaskIntoConstraints = true
-        let size = h.fittingSize
-        h.frame = CGRect(origin: .zero, size: size)
-        frame = CGRect(origin: .zero, size: size)
-        centerOffset = CGPoint(x: 0, y: -size.height / 2)
-        addSubview(h)
-        host = h
+    func configure(moment: Moment) {
+        guard renderedID != moment.id else { return }
+        renderedID = moment.id
+        let renderer = ImageRenderer(content: MomentPin(moment: moment, action: {}).padding(6))
+        renderer.scale = 2
+        if let img = renderer.nsImage {
+            image = img
+            centerOffset = CGPoint(x: 0, y: -img.size.height / 2 + 6)
+        }
     }
 }
