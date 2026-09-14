@@ -60,11 +60,16 @@ Trace/
     Track.swift           Analysed track, interpolation, speed-band runs
     Format.swift          Locale-aware formatting
   Views/
-    TrackView.swift       Map, overlays, toolbar, flyover camera
+    TrackView.swift       Window shell: overlays, toolbar, default-handler offer
+    MapStage.swift        MKMapView stage: gradient track, rider, flyover camera (imperative, per-frame)
     StatsCard.swift       Ride summary
     MomentsCard.swift     Moment list
     TimelinePanel.swift   Transport, speed chart scrubber, readout
     SpeedPalette.swift    Slow→fast colour ramp
 ```
 
-Environment variables for testing: `TRACE_AUTOPLAY=0.45` starts playback at 45 % of the ride; `TRACE_APPEARANCE=dark|light` forces the appearance.
+## Smooth playback
+
+Playback is driven by a `CADisplayLink`, and every per-frame update (camera, rider marker, playhead, readout) bypasses SwiftUI diffing: the map is an `MKMapView` updated imperatively, the chart is static with a separate playhead overlay, and the shell view never reads the playhead. The flyover camera follows a denoised copy of the track (triangular moving average over ±8 s, heading from a ±6 s window) with time-based low-pass filters, so GPS jitter and polyline corners don't shake the view. Measured on the sample ride: 60 Hz with no dropped frames.
+
+Environment variables for testing: `TRACE_AUTOPLAY=0.45` starts playback at 45 % of the ride; `TRACE_SEEK=0.2` seeks without playing; `TRACE_FLYOVER=0` starts with flyover off; `TRACE_APPEARANCE=dark|light` forces the appearance; `TRACE_CAMLOG=1` logs requested and reported camera positions to stderr.

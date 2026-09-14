@@ -92,7 +92,8 @@ nonisolated enum TrackBuilder {
 
         let waypoints = file.waypoints.map { Waypoint(name: $0.name, latitude: $0.point.latitude, longitude: $0.point.longitude) }
         var track = Track(name: file.name ?? fallbackName, startDate: start, hasTime: hasTime, hasElevation: hasElevation,
-                          samples: samples, waypoints: waypoints, stats: stats, moments: [], mapRect: mapRect(for: samples))
+                          samples: samples, waypoints: waypoints, stats: stats, moments: [], mapRect: mapRect(for: samples),
+                          smooth: SmoothPath.build(from: samples, duration: samples.last?.t ?? 0))
         track.moments = moments(for: track, rawSpeeds: rawSpeeds)
         return track
     }

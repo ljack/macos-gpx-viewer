@@ -72,6 +72,7 @@ nonisolated struct Track: Sendable {
     var stats: TrackStats
     var moments: [Moment]
     var mapRect: MKMapRect
+    var smooth: SmoothPath
 
     var duration: TimeInterval { samples.last?.t ?? 0 }
     var endDate: Date? { startDate.map { $0.addingTimeInterval(duration) } }
@@ -169,4 +170,74 @@ nonisolated struct ColourRun: Identifiable, Sendable {
     var coordinates: [CLLocationCoordinate2D]
     /// 0 = slowest, 1 = fastest.
     var fraction: Double
+}
+
+/// A denoised version of the track sampled on a uniform time grid. Used for the flyover camera
+/// and the rider's heading, so GPS jitter and polyline corners don't shake the view.
+nonisolated struct SmoothPath: Sendable {
+    var step: TimeInterval
+    var latitudes: [Double]
+    var longitudes: [Double]
+
+    var duration: TimeInterval { Double(max(latitudes.count - 1, 0)) * step }
+
+    func position(at t: TimeInterval) -> CLLocationCoordinate2D {
+        guard latitudes.count > 1 else {
+            return CLLocationCoordinate2D(latitude: latitudes.first ?? 0, longitude: longitudes.first ?? 0)
+        }
+        let x = min(max(t / step, 0), Double(latitudes.count - 1))
+        let i = min(Int(x), latitudes.count - 2)
+        let f = x - Double(i)
+        return CLLocationCoordinate2D(latitude: latitudes[i] + (latitudes[i + 1] - latitudes[i]) * f,
+                                      longitude: longitudes[i] + (longitudes[i + 1] - longitudes[i]) * f)
+    }
+
+    /// Direction of travel across a window centred on `t`, in degrees from north.
+    func bearing(at t: TimeInterval, span: TimeInterval = 6) -> Double? {
+        let a = position(at: t - span), b = position(at: t + span)
+        let dLat = b.latitude - a.latitude
+        let dLon = (b.longitude - a.longitude) * cos((a.latitude + b.latitude) / 2 * .pi / 180)
+        guard abs(dLat) + abs(dLon) > 1e-7 else { return nil }
+        var deg = atan2(dLon, dLat) * 180 / .pi
+        if deg < 0 { deg += 360 }
+        return deg
+    }
+
+    static func build(from samples: [Sample], duration: TimeInterval, window: TimeInterval = 8) -> SmoothPath {
+        guard samples.count > 1, duration > 0 else {
+            return SmoothPath(step: 1, latitudes: samples.map(\.latitude), longitudes: samples.map(\.longitude))
+        }
+        // Keep the grid bounded for very long recordings.
+        let step = max(1, (duration / 20_000).rounded(.up))
+        let count = Int(duration / step) + 1
+        // Raw positions on the grid (linear interpolation along the polyline).
+        var rawLat = [Double](repeating: 0, count: count)
+        var rawLon = [Double](repeating: 0, count: count)
+        var j = 0
+        for k in 0..<count {
+            let t = Double(k) * step
+            while j + 1 < samples.count - 1, samples[j + 1].t <= t { j += 1 }
+            let a = samples[j], b = samples[min(j + 1, samples.count - 1)]
+            let span = b.t - a.t
+            let f = span > 0 ? min(max((t - a.t) / span, 0), 1) : 0
+            rawLat[k] = a.latitude + (b.latitude - a.latitude) * f
+            rawLon[k] = a.longitude + (b.longitude - a.longitude) * f
+        }
+        // Triangular-weighted moving average over ±window (two box passes = triangle).
+        let radius = max(1, Int(window / step))
+        func box(_ v: [Double]) -> [Double] {
+            var out = v
+            var sum = 0.0
+            var lo = 0, hi = -1
+            for k in v.indices {
+                let targetHi = min(k + radius, v.count - 1)
+                while hi < targetHi { hi += 1; sum += v[hi] }
+                let targetLo = max(k - radius, 0)
+                while lo < targetLo { sum -= v[lo]; lo += 1 }
+                out[k] = sum / Double(hi - lo + 1)
+            }
+            return out
+        }
+        return SmoothPath(step: step, latitudes: box(box(rawLat)), longitudes: box(box(rawLon)))
+    }
 }

@@ -5,13 +5,27 @@ struct TimelinePanel: View {
     let track: Track
     @Bindable var playback: Playback
 
-    private struct Bin: Identifiable {
+    struct Bin: Identifiable {
         let id: Int
         let t: Double
         let speed: Double
     }
 
-    private var bins: [Bin] {
+    private let bins: [Bin]
+    private let fill: LinearGradient
+    private let line: LinearGradient
+    @State private var plot: CGRect = .zero
+
+    init(track: Track, playback: Playback) {
+        self.track = track
+        self.playback = playback
+        let b = Self.makeBins(track)
+        bins = b
+        fill = Self.speedGradient(track, b, opacity: 0.45)
+        line = Self.speedGradient(track, b, opacity: 1)
+    }
+
+    private static func makeBins(_ track: Track) -> [Bin] {
         let s = track.samples
         guard s.count > 1 else { return [] }
         let target = 360
@@ -28,14 +42,17 @@ struct TimelinePanel: View {
         return out
     }
 
-    private var current: Sample { track.sample(at: playback.elapsed) }
-
     var body: some View {
         HStack(spacing: 18) {
             transport
-            chart
-                .frame(height: 78)
-            readout
+            ZStack {
+                StaticSpeedChart(track: track, bins: bins, fill: fill, line: line, axisValues: axisValues) { axisLabel($0) }
+                    .equatable()
+                PlayheadOverlay(track: track, playback: playback, plot: plot)
+            }
+            .onPreferenceChange(PlotFrameKey.self) { plot = $0 }
+            .frame(height: 78)
+            Readout(track: track, playback: playback)
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 14)
@@ -76,65 +93,7 @@ struct TimelinePanel: View {
         }
     }
 
-    private var chart: some View {
-        let playhead = playback.elapsed
-        let live = current
-        let data = bins
-        let fill = speedGradient(data, opacity: 0.45)
-        let line = speedGradient(data, opacity: 1)
-        return Chart {
-            ForEach(data) { bin in
-                AreaMark(x: .value("Time", bin.t), y: .value("Speed", bin.speed))
-                    .interpolationMethod(.monotone)
-                    .foregroundStyle(fill)
-                LineMark(x: .value("Time", bin.t), y: .value("Speed", bin.speed))
-                    .interpolationMethod(.monotone)
-                    .lineStyle(StrokeStyle(lineWidth: 1.5))
-                    .foregroundStyle(line)
-            }
-            RuleMark(x: .value("Now", playhead))
-                .lineStyle(StrokeStyle(lineWidth: 1.5))
-                .foregroundStyle(.primary.opacity(0.8))
-            PointMark(x: .value("Now", playhead), y: .value("Speed", live.speed))
-                .symbolSize(90)
-                .foregroundStyle(.white)
-            PointMark(x: .value("Now", playhead), y: .value("Speed", live.speed))
-                .symbolSize(40)
-                .foregroundStyle(SpeedPalette.color(track.speedFraction(live.speed)))
-        }
-        .chartXScale(domain: 0...max(track.duration, 1))
-        .chartYScale(domain: 0...max(track.stats.maxSpeed * 1.08, 1))
-        .chartYAxis(.hidden)
-        .chartXAxis {
-            AxisMarks(values: axisValues) { value in
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(.secondary.opacity(0.3))
-                AxisValueLabel {
-                    if let t = value.as(Double.self) {
-                        Text(axisLabel(t)).font(.caption2).foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
-        .chartOverlay { proxy in
-            GeometryReader { geo in
-                Rectangle()
-                    .fill(.clear)
-                    .contentShape(.rect)
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { g in
-                                guard let plot = proxy.plotFrame else { return }
-                                let x = g.location.x - geo[plot].origin.x
-                                if let t: Double = proxy.value(atX: x) {
-                                    playback.pause()
-                                    playback.seek(t)
-                                }
-                            })
-            }
-        }
-    }
-
-    private func speedGradient(_ data: [Bin], opacity: Double) -> LinearGradient {
+    private static func speedGradient(_ track: Track, _ data: [Bin], opacity: Double) -> LinearGradient {
         let d = max(track.duration, 1)
         let stops = data.map { bin in
             Gradient.Stop(color: SpeedPalette.color(track.speedFraction(bin.speed)).opacity(opacity), location: bin.t / d)
@@ -155,8 +114,15 @@ struct TimelinePanel: View {
         return Format.distance(track.sample(at: t).distance)
     }
 
-    private var readout: some View {
-        let s = current
+}
+
+/// Live numbers at the playhead. Separate view so only it re-renders per frame.
+private struct Readout: View {
+    let track: Track
+    @Bindable var playback: Playback
+
+    var body: some View {
+        let s = track.sample(at: playback.elapsed)
         return VStack(alignment: .trailing, spacing: 2) {
             if let start = track.startDate {
                 Text(Format.timeOfDay(start.addingTimeInterval(s.t)))
@@ -180,5 +146,90 @@ struct TimelinePanel: View {
         }
         .frame(width: 150, alignment: .trailing)
         .contentTransition(.numericText())
+    }
+}
+
+/// The chart itself never depends on the playhead, so it is only rebuilt when the window resizes.
+private struct StaticSpeedChart: View, Equatable {
+    let track: Track
+    let bins: [TimelinePanel.Bin]
+    let fill: LinearGradient
+    let line: LinearGradient
+    let axisValues: [Double]
+    let axisLabel: (Double) -> String
+
+    static func == (a: Self, b: Self) -> Bool { a.bins.count == b.bins.count && a.track.duration == b.track.duration }
+
+    var body: some View {
+        Chart {
+            ForEach(bins) { bin in
+                AreaMark(x: .value("Time", bin.t), y: .value("Speed", bin.speed))
+                    .interpolationMethod(.monotone)
+                    .foregroundStyle(fill)
+                LineMark(x: .value("Time", bin.t), y: .value("Speed", bin.speed))
+                    .interpolationMethod(.monotone)
+                    .lineStyle(StrokeStyle(lineWidth: 1.5))
+                    .foregroundStyle(line)
+            }
+        }
+        .chartXScale(domain: 0...max(track.duration, 1))
+        .chartYScale(domain: 0...max(track.stats.maxSpeed * 1.08, 1))
+        .chartYAxis(.hidden)
+        .chartXAxis {
+            AxisMarks(values: axisValues) { value in
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(.secondary.opacity(0.3))
+                AxisValueLabel {
+                    if let t = value.as(Double.self) {
+                        Text(axisLabel(t)).font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .chartOverlay { proxy in
+            GeometryReader { geo in
+                Color.clear.preference(key: PlotFrameKey.self, value: geo[proxy.plotFrame!])
+            }
+        }
+    }
+}
+
+private struct PlotFrameKey: PreferenceKey {
+    static let defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
+}
+
+/// Playhead line + dot, positioned in the chart's plot frame. Cheap to redraw every frame.
+private struct PlayheadOverlay: View {
+    let track: Track
+    @Bindable var playback: Playback
+    let plot: CGRect
+
+    var body: some View {
+        let sample = track.sample(at: playback.elapsed)
+        let fx = track.duration > 0 ? playback.elapsed / track.duration : 0
+        let yMax = max(track.stats.maxSpeed * 1.08, 1)
+        let x = plot.minX + plot.width * fx
+        let y = plot.maxY - plot.height * min(sample.speed / yMax, 1)
+        ZStack(alignment: .topLeading) {
+            Color.clear
+            Rectangle()
+                .fill(.primary.opacity(0.8))
+                .frame(width: 1.5, height: plot.height)
+                .offset(x: x - 0.75, y: plot.minY)
+            Circle()
+                .fill(SpeedPalette.color(track.speedFraction(sample.speed)))
+                .frame(width: 8, height: 8)
+                .overlay(Circle().stroke(.white, lineWidth: 2))
+                .offset(x: x - 4, y: y - 4)
+        }
+        .contentShape(.rect)
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { g in
+                    guard plot.width > 0 else { return }
+                    let f = min(max((g.location.x - plot.minX) / plot.width, 0), 1)
+                    playback.pause()
+                    playback.seek(track.duration * f)
+                })
     }
 }

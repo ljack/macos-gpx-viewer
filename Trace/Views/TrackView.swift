@@ -10,47 +10,35 @@ enum MapFlavor: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self { case .standard: "map"; case .hybrid: "map.fill"; case .satellite: "globe.europe.africa.fill" }
     }
-    var style: MapStyle {
-        switch self {
-        case .standard: .standard(elevation: .realistic, emphasis: .muted)
-        case .hybrid: .hybrid(elevation: .realistic)
-        case .satellite: .imagery(elevation: .realistic)
-        }
     }
 }
 
+/// Window-level shell. Its body must not read `playback.elapsed`: everything that moves per frame
+/// lives in `MapStage`, `PlayheadOverlay` and `Readout`, so the toolbar and cards are never re-laid out
+/// during playback.
 struct TrackView: View {
     let track: Track
     @State private var playback: Playback
-    @State private var camera: MapCameraPosition
     @State private var flavor: MapFlavor = .standard
-    @State private var heading: Double = 0
-    @State private var mapHeading: Double = 0
-    @State private var entryAnimationUntil: ContinuousClock.Instant = .now
     @State private var showDefaultOffer = DefaultHandler.shouldOffer
     @State private var madeDefault = false
     @State private var showStats = true
     @State private var showMomentsCard = true
-    @Namespace private var glass
-
-    private let runs: [ColourRun]
+    @State private var fitRequest = 0
 
     init(track: Track) {
         self.track = track
         _playback = State(initialValue: Playback(duration: track.duration))
-        _camera = State(initialValue: .rect(Self.fitRect(track.mapRect)))
-        runs = track.colourRuns()
     }
-
-    private static func fitRect(_ rect: MKMapRect) -> MKMapRect {
-        rect.insetBy(dx: -rect.width * 0.18, dy: -rect.height * 0.18)
-    }
-
-    private var current: Sample { track.sample(at: playback.elapsed) }
 
     var body: some View {
         ZStack {
-            map
+            MapStage(track: track, playback: playback, flavor: flavor, showMoments: playback.showMoments,
+                     fitRequest: fitRequest) { t in
+                playback.pause()
+                playback.seek(t)
+            }
+            .ignoresSafeArea()
             overlays
         }
         .toolbar { toolbar }
@@ -60,69 +48,26 @@ struct TrackView: View {
             if let mode = ProcessInfo.processInfo.environment["TRACE_APPEARANCE"] {
                 NSApp.appearance = NSAppearance(named: mode == "dark" ? .darkAqua : .aqua)
             }
+            if ProcessInfo.processInfo.environment["TRACE_FLYOVER"] == "0" { playback.flyover = false }
+            if let raw = ProcessInfo.processInfo.environment["TRACE_SEEK"], let f = Double(raw) {
+                playback.seek(track.duration * f)
+            }
             if let raw = ProcessInfo.processInfo.environment["TRACE_AUTOPLAY"], let f = Double(raw) {
                 playback.seek(track.duration * f)
                 playback.play()
             }
         }
-        .onChange(of: playback.elapsed) { _, _ in followIfNeeded() }
-        .onChange(of: playback.flyover) { _, on in
-            if on { followIfNeeded(animated: true) } else { fit() }
-        }
-        .onChange(of: playback.isPlaying) { _, playing in
-            if playing { followIfNeeded(animated: true) }
-        }
         .frame(minWidth: 900, minHeight: 600)
     }
 
-    // MARK: - Map
+    private func fit() { fitRequest += 1 }
 
-    private var map: some View {
-        Map(position: $camera, interactionModes: .all) {
-            ForEach(runs) { run in
-                MapPolyline(coordinates: run.coordinates)
-                    .stroke(.white.opacity(0.9), style: StrokeStyle(lineWidth: 7, lineCap: .round, lineJoin: .round))
-            }
-            ForEach(runs) { run in
-                MapPolyline(coordinates: run.coordinates)
-                    .stroke(SpeedPalette.color(run.fraction), style: StrokeStyle(lineWidth: 4.5, lineCap: .round, lineJoin: .round))
-            }
-
-            ForEach(track.waypoints) { wp in
-                Marker(wp.name, systemImage: "mappin", coordinate: wp.coordinate)
-                    .tint(.purple)
-            }
-
-            if playback.showMoments {
-                ForEach(track.moments) { moment in
-                    Annotation(moment.title, coordinate: moment.coordinate, anchor: .bottom) {
-                        MomentPin(moment: moment) {
-                            playback.pause()
-                            withAnimation(.snappy) { playback.seek(moment.t) }
-                        }
-                    }
-                    .annotationTitles(.hidden)
-                }
-            }
-
-            Annotation("Rider", coordinate: current.coordinate, anchor: .center) {
-                RiderMarker(bearing: current.bearing - mapHeading, color: SpeedPalette.color(track.speedFraction(current.speed)),
-                            playing: playback.isPlaying)
-            }
-            .annotationTitles(.hidden)
-        }
-        .mapStyle(flavor.style)
-        .onMapCameraChange(frequency: .continuous) { context in
-            mapHeading = context.camera.heading
-        }
-        .mapControls {
-            MapCompass()
-            MapScaleView()
-            MapPitchToggle()
-            MapZoomStepper()
-        }
-        .safeAreaPadding(.bottom, 128)
-        .ignoresSafeArea()
+    private func registerCommands() {
+        let c = PlaybackCommands.shared
+        c.togglePlay = { playback.toggle() }
+        c.skip = { playback.pause(); playback.skip($0) }
+        c.seekFraction = { playback.pause(); playback.seek(track.duration * $0) }
+        c.toggleFlyover = { playback.flyover.toggle() }
     }
 
     // MARK: - Overlays
@@ -245,76 +190,11 @@ struct TrackView: View {
         }
     }
 
-    // MARK: - Camera
-
-    private func fit() {
-        withAnimation(.smooth(duration: 0.8)) {
-            camera = .rect(Self.fitRect(track.mapRect))
-        }
-    }
-
-    private func followIfNeeded(animated: Bool = false) {
-        guard playback.flyover else { return }
-        let s = current
-        var delta = s.bearing - heading
-        if delta > 180 { delta -= 360 } else if delta < -180 { delta += 360 }
-        heading += delta * 0.08
-        if heading < 0 { heading += 360 } else if heading >= 360 { heading -= 360 }
-        let cam = MapCamera(centerCoordinate: s.coordinate, distance: 1400, heading: heading, pitch: 62)
-        if animated {
-            heading = s.bearing
-            entryAnimationUntil = .now + .seconds(1.3)
-            withAnimation(.smooth(duration: 1.2)) {
-                camera = .camera(MapCamera(centerCoordinate: s.coordinate, distance: 1400, heading: heading, pitch: 62))
-            }
-        } else if ContinuousClock.now >= entryAnimationUntil {
-            // Direct assignment: an implicit animation per tick would lag behind the rider at high rates.
-            var t = Transaction(); t.disablesAnimations = true
-            withTransaction(t) { camera = .camera(cam) }
-        }
-    }
-
-    private func registerCommands() {
-        let c = PlaybackCommands.shared
-        c.togglePlay = { playback.toggle() }
-        c.skip = { playback.pause(); playback.skip($0) }
-        c.seekFraction = { playback.pause(); playback.seek(track.duration * $0) }
-        c.toggleFlyover = { playback.flyover.toggle() }
-    }
 }
 
 // MARK: - Markers
 
-private struct RiderMarker: View {
-    let bearing: Double
-    let color: Color
-    let playing: Bool
-
-    var body: some View {
-        ZStack {
-            if playing {
-                Circle()
-                    .fill(color.opacity(0.25))
-                    .frame(width: 44, height: 44)
-            }
-            Circle()
-                .fill(.white)
-                .frame(width: 26, height: 26)
-                .shadow(color: .black.opacity(0.35), radius: 4, y: 2)
-            Circle()
-                .fill(color.gradient)
-                .frame(width: 20, height: 20)
-            Image(systemName: "location.north.fill")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(.white)
-                .rotationEffect(.degrees(bearing))
-        }
-        .animation(.linear(duration: 0.1), value: bearing)
-        .accessibilityLabel("Rider position")
-    }
-}
-
-private struct MomentPin: View {
+struct MomentPin: View {
     let moment: Moment
     let action: () -> Void
 
@@ -346,7 +226,7 @@ private struct MomentPin: View {
     }
 }
 
-private struct Triangle: Shape {
+struct Triangle: Shape {
     func path(in rect: CGRect) -> Path {
         var p = Path()
         p.move(to: CGPoint(x: rect.minX, y: rect.minY))
